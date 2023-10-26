@@ -1,20 +1,19 @@
 use std::time::Duration;
 
 use bevy::ecs::schedule::ScheduleLabel;
-use bevy::ecs::system::EntityCommands;
-use bevy::prelude::{Component, IntoSystemConfigs, Query, Res, Schedules, TimerMode};
+use bevy::prelude::{Commands, Component, Entity,  Query, Res, Resource, Schedules, TimerMode, World};
 use bevy::time::{Time, Timer};
 
 use crate::async_schedules::TaskSender;
 use crate::prelude::AsyncScheduleCommand;
-use crate::runner::{AsyncSchedule, IntoAsyncScheduleCommand, schedule_initialize, task_running};
+use crate::runner::{IntoSetupAction, schedule_initialize, SetupAction};
 
 pub(crate) struct DelayTime(pub Duration);
 
 
-impl IntoAsyncScheduleCommand for DelayTime {
-    fn into_schedule_command(self, sender: TaskSender<()>, schedule_label: impl ScheduleLabel + Clone) -> AsyncScheduleCommand {
-        AsyncScheduleCommand::new(Executor {
+impl IntoSetupAction for DelayTime {
+    fn into_action(self, sender: TaskSender<()>, schedule_label: impl ScheduleLabel + Clone) -> AsyncScheduleCommand {
+        AsyncScheduleCommand::new(Setup {
             schedule_label,
             sender,
             timer: Timer::new(self.0, TimerMode::Once),
@@ -23,36 +22,55 @@ impl IntoAsyncScheduleCommand for DelayTime {
 }
 
 
+#[derive(Resource)]
+struct TimeSystemExists;
+
+
 #[derive(Component)]
 struct LocalTimer(Timer);
 
 
-struct Executor<Label> {
+struct Setup<Label> {
     sender: TaskSender<()>,
     timer: Timer,
     schedule_label: Label,
 }
 
 
-impl<Label: ScheduleLabel + Clone> AsyncSchedule for Executor<Label> {
-    fn initialize(self: Box<Self>, entity_commands: &mut EntityCommands, schedules: &mut Schedules) {
-        let schedule = schedule_initialize(schedules, &self.schedule_label);
-        entity_commands.insert((
+impl<Label: ScheduleLabel + Clone> SetupAction for Setup<Label> {
+    fn setup(self: Box<Self>, world: &mut World) {
+        if !world.contains_resource::<TimeSystemExists>() {
+            world.insert_resource(TimeSystemExists);
+            let mut schedules = world.resource_mut::<Schedules>();
+            let schedule = schedule_initialize(&mut schedules, &self.schedule_label);
+            schedule.add_systems(tick_timer);
+        }
+
+        world.spawn((
             self.sender,
             LocalTimer(self.timer)
         ));
-        let entity = entity_commands.id();
-
-        schedule.add_systems((move |time: Res<Time>, mut query: Query<(&mut TaskSender<()>, &mut LocalTimer)>| {
-            let Ok((mut sender, mut timer)) = query.get_mut(entity) else { return; };
-            if timer.0.tick(time.delta()).just_finished() {
-                let _ = sender.try_send(());
-                sender.close_channel();
-            }
-        }).run_if(task_running::<()>(entity)));
     }
 }
 
+
+fn tick_timer(
+    mut commands: Commands,
+    mut frames: Query<(Entity, &mut TaskSender<()>, &mut LocalTimer)>,
+    time: Res<Time>,
+) {
+    for (entity, mut sender, mut timer) in frames.iter_mut() {
+        if sender.is_closed() {
+            commands.entity(entity).despawn();
+        } else {
+            if timer.0.tick(time.delta()).just_finished() {
+                let _ = sender.0.try_send(());
+                sender.close_channel();
+                commands.entity(entity).despawn();
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -60,9 +78,10 @@ mod tests {
 
     use bevy::app::{Startup, Update};
     use bevy::ecs::event::ManualEventReader;
-    use bevy::prelude::Commands;
+    use bevy::prelude::{World};
+    use crate::ext::spawn_async_system::SpawnAsyncSystemWorld;
 
-    use crate::ext::spawn_async_system::SpawnAsyncSystem;
+
     use crate::runner::{delay, once};
     use crate::test_util::{FirstEvent, is_first_event_already_coming, new_app};
 
@@ -70,8 +89,8 @@ mod tests {
     fn delay_time() {
         let mut app = new_app();
 
-        app.add_systems(Startup, |mut commands: Commands| {
-            commands.spawn_async(|schedules| async move {
+        app.add_systems(Startup, |world: &mut World| {
+            world.spawn_async(|schedules| async move {
                 schedules.add_system(Update, delay::timer(Duration::ZERO)).await;
                 schedules.add_system(Update, once::send(FirstEvent)).await;
             });

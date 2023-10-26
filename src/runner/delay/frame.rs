@@ -1,17 +1,16 @@
 use bevy::ecs::schedule::ScheduleLabel;
-use bevy::ecs::system::EntityCommands;
-use bevy::prelude::{IntoSystemConfigs, Local, Query, Schedules};
+use bevy::prelude::{Commands, Component, Entity, IntoSystemConfigs, Query, Resource, Schedules, World};
 
 use crate::async_schedules::TaskSender;
-use crate::prelude::{AsyncScheduleCommand, IntoAsyncScheduleCommand};
-use crate::runner::{AsyncSchedule, schedule_initialize, task_running};
+use crate::prelude::{AsyncScheduleCommand, IntoSetupAction};
+use crate::runner::{schedule_initialize, SetupAction};
 
 pub(crate) struct DelayFrame(pub usize);
 
 
-impl IntoAsyncScheduleCommand for DelayFrame {
-    fn into_schedule_command(self, sender: TaskSender<()>, schedule_label: impl ScheduleLabel + Clone) -> AsyncScheduleCommand {
-        AsyncScheduleCommand::new(Scheduler {
+impl IntoSetupAction for DelayFrame {
+    fn into_action(self, sender: TaskSender<()>, schedule_label: impl ScheduleLabel + Clone) -> AsyncScheduleCommand {
+        AsyncScheduleCommand::new(Setup {
             sender,
             schedule_label,
             delay_frames: self.0,
@@ -20,46 +19,72 @@ impl IntoAsyncScheduleCommand for DelayFrame {
 }
 
 
-struct Scheduler<Label> {
+#[derive(Component)]
+struct DelayFrameCount {
+    current: usize,
+}
+
+#[derive(Resource)]
+struct FrameSystemExistsMarker;
+
+struct Setup<Label> {
     delay_frames: usize,
     schedule_label: Label,
     sender: TaskSender<()>,
 }
 
 
-impl<Label: ScheduleLabel + Clone> AsyncSchedule for Scheduler<Label> {
-    fn initialize(self: Box<Self>, entity_commands: &mut EntityCommands, schedules: &mut Schedules) {
-        let schedule = schedule_initialize(schedules, &self.schedule_label);
-        entity_commands.insert(self.sender);
-        let entity = entity_commands.id();
-        let delay_frames = self.delay_frames;
-        schedule.add_systems((move |mut frame_count: Local<usize>, mut senders: Query<&mut TaskSender<()>>| {
-            *frame_count += 1;
-            if delay_frames <= *frame_count {
-                let Ok(mut sender) = senders.get_mut(entity) else { return; };
-                let _ = sender.try_send(());
-                sender.close_channel();
-            }
-        }).run_if(task_running::<()>(entity)));
+impl<Label: ScheduleLabel + Clone> SetupAction for Setup<Label> {
+    fn setup(self: Box<Self>, world: &mut World) {
+        if !world.contains_resource::<FrameSystemExistsMarker>() {
+            world.insert_resource(FrameSystemExistsMarker);
+            let mut schedules = world.resource_mut::<Schedules>();
+            let schedule = schedule_initialize(&mut schedules, &self.schedule_label);
+            schedule.add_systems(count_decrement);
+        }
+
+        world.spawn((
+            self.sender,
+            DelayFrameCount { current: self.delay_frames }
+        ));
     }
 }
 
+
+fn count_decrement(
+    mut commands: Commands,
+    mut frames: Query<(Entity, &mut TaskSender<()>, &mut DelayFrameCount)>,
+) {
+    for (entity, mut sender, mut frame_count) in frames.iter_mut() {
+        if sender.is_closed() || frame_count.current == 0 {
+            commands.entity(entity).despawn();
+        } else {
+            frame_count.current -= 1;
+            if frame_count.current == 0 {
+                let _ = sender.0.try_send(());
+                sender.close_channel();
+                commands.entity(entity).despawn();
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use bevy::app::{Startup, Update};
     use bevy::ecs::event::ManualEventReader;
-    use bevy::prelude::Commands;
+    use bevy::prelude::{Commands, World};
+    use crate::ext::spawn_async_system::SpawnAsyncSystemWorld;
 
-    use crate::ext::spawn_async_system::SpawnAsyncSystem;
+
     use crate::runner::{delay, once};
     use crate::test_util::{FirstEvent, is_first_event_already_coming, new_app};
 
     #[test]
     fn delay_3frames() {
         let mut app = new_app();
-        app.add_systems(Startup, |mut commands: Commands| {
-            commands.spawn_async(|schedules| async move {
+        app.add_systems(Startup, |world: &mut World| {
+            world.spawn_async(|schedules| async move {
                 schedules.add_system(Update, delay::frames(3)).await;
                 schedules.add_system(Update, once::send(FirstEvent)).await;
             });

@@ -1,12 +1,16 @@
 #![allow(clippy::type_complexity)]
 
-use bevy::app::{App, First, Main, Plugin};
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
+
+use bevy::app::{App, First, Main, Plugin, Update};
+use bevy::ecs::schedule::ScheduleLabel;
 use bevy::hierarchy::DespawnRecursiveExt;
-use bevy::prelude::{Commands, Entity, Query, ResMut, Schedules};
+use bevy::prelude::{Commands, Entity, NonSend, Query, ResMut, Schedules, World};
 use futures_lite::future::block_on;
 
 use crate::async_schedules::TaskHandle;
-use crate::runner::AsyncScheduleCommands;
+use crate::runner::AsyncScheduleCommand;
+use crate::runner::main_thread::{MainThreadRunner, MainThreadRunnerReceiver, MainThreadRunnerSender, SystemOnMainRunnable};
 
 pub mod async_schedules;
 pub mod ext;
@@ -18,7 +22,6 @@ pub mod prelude {
     pub use crate::{
         async_schedules::*,
         AsyncSystemPlugin,
-        ext::spawn_async_system::SpawnAsyncSystem,
         runner::preludes::*,
     };
 }
@@ -31,22 +34,47 @@ impl Plugin for AsyncSystemPlugin {
     fn build(&self, app: &mut App) {
         {
             use bevy::prelude::IntoSystemConfigs;
+            let (tx, rx) = std::sync::mpsc::sync_channel::<AsyncScheduleCommand>(100);
             app
                 .add_systems(Main, remove_finished_tasks)
-                .add_systems(First, init_async_schedulers.after(remove_finished_tasks));
+                .add_systems(First, scedule_command)
+                .insert_non_send_resource(rx)
+                .insert_non_send_resource(tx);
         }
     }
 }
 
-fn init_async_schedulers(
-    mut commands: Commands,
-    mut schedules: ResMut<Schedules>,
-    executors_query: Query<(Entity, &AsyncScheduleCommands)>,
-) {
-    for (entity, executors) in executors_query.iter() {
-        executors.init_schedulers(&mut commands.entity(entity), &mut schedules);
+
+
+fn scedule_command(
+    world: &mut World
+){
+    let rx= world.remove_non_send_resource::<Receiver<AsyncScheduleCommand>>().unwrap();
+    for s in rx.try_iter(){
+        s.0.setup(world);
     }
+    world.insert_non_send_resource(rx);
 }
+
+
+fn execute_main_thread_runners<L: ScheduleLabel>(
+    world: &mut World
+) {
+    let rx = world.remove_non_send_resource::<MainThreadRunnerReceiver<L>>().unwrap();
+    let mut non_completes = Vec::new();
+    for mut runner in rx.try_iter() {
+        if !runner.run(world) {
+           non_completes.push(runner);
+        }
+    }
+
+    for runner in non_completes.into_iter(){
+         world.non_send_resource::<MainThreadRunnerSender<L>>().send(runner).unwrap();
+    }
+
+    world.insert_non_send_resource(rx);
+}
+
 
 
 fn remove_finished_tasks(

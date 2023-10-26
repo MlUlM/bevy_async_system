@@ -45,11 +45,17 @@ path = "examples/join_handle/join_all.rs"
 name = "once"
 path = "examples/once.rs"
 
-
 [[example]]
 name = "repeat"
 path = "examples/repeat.rs"
 
+#[[bench]]
+#name = "move_shape"
+#harness = false
+
+[[bench]]
+name = "amount_of_add_systems"
+harness = false
 
 [dependencies]
 bevy = { version = "0.11.3", default-features = false }
@@ -66,3 +72,4 @@ bevy_async_system = { path = "." }
 reqwest = "0.11.22"
 bevy_framepace = "0.13.3"
 bevy-inspector-egui = "0.20.0"
+criterion = "0.5.1"

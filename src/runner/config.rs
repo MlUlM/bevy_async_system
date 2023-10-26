@@ -1,23 +1,34 @@
 use std::marker::PhantomData;
 
-use bevy::prelude::IntoSystem;
+use bevy::prelude::{IntoSystem, System, World};
 
-pub(crate) struct AsyncSystemConfig<Out, Marker, Sys> {
+pub(crate) struct AsyncSystemConfig<Out, Sys> {
     pub system: Sys,
     m2: PhantomData<Out>,
-    m3: PhantomData<Marker>,
+    initialized: bool,
 }
 
 
-impl<Out, Marker, Sys> AsyncSystemConfig<Out, Marker, Sys>
-    where Sys: IntoSystem<(), Out, Marker> + 'static + Send
+impl<Out, Sys> AsyncSystemConfig<Out, Sys>
+    where Sys: System<In=(), Out=Out> + 'static
 {
     #[inline(always)]
-    pub const fn new(system: Sys) -> AsyncSystemConfig<Out, Marker, Sys> {
+    pub fn new<Marker>(system: impl IntoSystem<(), Out, Marker, System=Sys> + 'static) -> AsyncSystemConfig<Out, Sys> {
         Self {
-            system,
+            system: IntoSystem::into_system(system),
             m2: PhantomData,
-            m3: PhantomData,
+            initialized: false,
         }
+    }
+
+
+    pub fn run(&mut self, world: &mut World) -> Out {
+
+        if !self.initialized {
+            self.system.initialize(world);
+            self.system.apply_deferred(world);
+            self.initialized = true;
+        }
+        self.system.run((), world)
     }
 }

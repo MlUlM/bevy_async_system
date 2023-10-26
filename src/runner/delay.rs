@@ -2,11 +2,12 @@ use std::time::Duration;
 
 use crate::runner::delay::frame::DelayFrame;
 use crate::runner::delay::time::DelayTime;
-use crate::runner::IntoAsyncScheduleCommand;
+use crate::runner::IntoSetupAction;
 
 // mod time;
 mod frame;
 mod time;
+
 
 
 /// Delays by the specified number of frames.
@@ -25,7 +26,7 @@ mod time;
 /// }
 /// ```
 #[inline(always)]
-pub const fn frames(delay_frames: usize) -> impl IntoAsyncScheduleCommand {
+pub const fn frames(delay_frames: usize) -> impl IntoSetupAction {
     DelayFrame(delay_frames)
 }
 
@@ -47,6 +48,6 @@ pub const fn frames(delay_frames: usize) -> impl IntoAsyncScheduleCommand {
 /// }
 /// ```
 #[inline(always)]
-pub const fn timer(duration: Duration) -> impl IntoAsyncScheduleCommand {
+pub const fn timer(duration: Duration) -> impl IntoSetupAction {
     DelayTime(duration)
 }
